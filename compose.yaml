@@ -1,0 +1,132 @@
+services:
+  app:
+    image: "${IMAGE_NAME:-study-planner-agent}:${IMAGE_TAG:-local}"
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: study-planner-agent
+    init: true
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    environment:
+      APP_ENV: "${APP_ENV:-production}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+      LOG_FILE: "${LOG_FILE:-/app/logs/app.log}"
+    volumes:
+      - app_logs:/app/logs
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    container_name: study-planner-prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-15d}
+      - --web.enable-lifecycle
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "--quiet", "http://127.0.0.1:9090/-/healthy"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  loki:
+    image: grafana/loki:3.5.0
+    container_name: study-planner-loki
+    restart: unless-stopped
+    command: -config.file=/etc/loki/config.yml
+    volumes:
+      - ./observability/loki/config.yml:/etc/loki/config.yml:ro
+      - loki_data:/loki
+    ports:
+      - "${LOKI_PORT:-3100}:3100"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "--quiet", "http://127.0.0.1:3100/ready"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  tempo:
+    image: grafana/tempo:2.8.2
+    container_name: study-planner-tempo
+    restart: unless-stopped
+    command: -config.file=/etc/tempo/config.yml
+    volumes:
+      - ./observability/tempo/config.yml:/etc/tempo/config.yml:ro
+      - tempo_data:/var/tempo
+    ports:
+      - "${TEMPO_HTTP_PORT:-3200}:3200"
+      - "${TEMPO_OTLP_GRPC_PORT:-4317}:4317"
+      - "${TEMPO_OTLP_HTTP_PORT:-4318}:4318"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "--quiet", "http://127.0.0.1:3200/ready"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  alloy:
+    image: grafana/alloy:v1.9.1
+    container_name: study-planner-alloy
+    restart: unless-stopped
+    command: run --server.http.listen-addr=0.0.0.0:12345 /etc/alloy/config.alloy
+    volumes:
+      - ./observability/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - app_logs:/var/log/app:ro
+      - alloy_data:/var/lib/alloy
+    depends_on:
+      loki:
+        condition: service_healthy
+
+  grafana:
+    image: grafana/grafana:12.1.1
+    container_name: study-planner-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: "${GRAFANA_ADMIN_USER:-admin}"
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:-change-me}"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_FEATURE_TOGGLES_ENABLE: "traceToLogs,traceToMetrics"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    depends_on:
+      prometheus:
+        condition: service_healthy
+      loki:
+        condition: service_healthy
+      tempo:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider --quiet http://127.0.0.1:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  app_logs:
+  prometheus_data:
+  loki_data:
+  tempo_data:
+  alloy_data:
+  grafana_data:
