@@ -71,18 +71,18 @@ Workflow nằm tại `.github/workflows/ci-cd.yml` và hoạt động như sau:
 
 ```text
 Pull Request -> test + compile + Docker build
-push main   -> test -> build/push GHCR -> SSH EC2 -> compose pull/up -> health check -> rollback nếu lỗi
+push main   -> test -> build/push GHCR -> deploy dev -> deploy production -> health check/rollback
 ```
 
 ### Chuẩn bị EC2
 
 EC2 cần Linux, Docker Engine và Docker Compose v2. User SSH phải chạy được Docker (thường thêm user vào group `docker` rồi đăng nhập lại). Security Group chỉ nên mở port 22 từ IP runner/địa chỉ quản trị và port ứng dụng hoặc reverse proxy theo nhu cầu.
 
-Tạo thư mục deploy, ví dụ `/opt/study-planner-agent`. Workflow tự copy `compose.yaml` và `.env.example`; lần đầu nó tạo `.env` từ `.env.example` nếu chưa có.
+Tạo thư mục deploy, ví dụ `/opt/study-planner-agent`. User SSH cần có Docker và `sudo` không hỏi password để workflow tạo/chown thư mục deploy. Workflow tự copy `compose.yaml`, `.env.example` và thư mục `observability`; lần đầu nó tạo `.env` từ `.env.example` nếu chưa có.
 
 ### GitHub Actions secrets
 
-Tạo các secrets ở repository hoặc environment `production`:
+Tạo cùng bộ secrets trong cả hai environment `dev` và `production`; mỗi environment chứa giá trị EC2 tương ứng:
 
 | Secret | Nội dung |
 |---|---|
@@ -91,7 +91,7 @@ Tạo các secrets ở repository hoặc environment `production`:
 | `EC2_APP_DIR` | Đường dẫn tuyệt đối, ví dụ `/opt/study-planner-agent` |
 | `EC2_SSH_PRIVATE_KEY` | Private key SSH tương ứng public key trên EC2 |
 
-Không đưa private key hoặc `.env` production vào Git. Workflow dùng `GITHUB_TOKEN` để push image; image GHCR phải public vì EC2 không còn đăng nhập GHCR. Deploy chỉ chạy khi push vào `main`; có thể bật required reviewers cho environment `production` để thêm bước duyệt thủ công.
+Không đưa private key hoặc `.env` production vào Git. Workflow dùng `GITHUB_TOKEN` để push image; image GHCR phải public vì EC2 không còn đăng nhập GHCR. Push vào `main` sẽ deploy dev trước, sau đó production; có thể bật required reviewers cho environment `production` để thêm bước duyệt thủ công.
 
 ### Lưu ý rollback
 

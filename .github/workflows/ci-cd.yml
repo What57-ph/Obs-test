@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       deploy:
-        description: Deploy the selected revision to production
+        description: Deploy the selected revision to dev and production
         type: boolean
         required: true
         default: true
@@ -17,7 +17,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: production-deploy
+  group: deployment-pipeline
   cancel-in-progress: false
 
 env:
@@ -95,9 +95,103 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  deploy:
-    name: Deploy to EC2
+  deploy-dev:
+    name: Deploy to dev EC2
     needs: [test, build]
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && inputs.deploy == true)
+    runs-on: ubuntu-latest
+    environment:
+      name: dev
+    permissions:
+      contents: read
+    env:
+      EC2_HOST: ${{ secrets.EC2_HOST }}
+      EC2_USER: ${{ secrets.EC2_USER }}
+      EC2_APP_DIR: ${{ secrets.EC2_APP_DIR }}
+    steps:
+      - name: Checkout deployment files
+        uses: actions/checkout@v4
+
+      - name: Configure SSH
+        shell: bash
+        env:
+          EC2_SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$EC2_HOST" || { echo "EC2_HOST secret is required"; exit 1; }
+          test -n "$EC2_USER" || { echo "EC2_USER secret is required"; exit 1; }
+          test -n "$EC2_APP_DIR" || { echo "EC2_APP_DIR secret is required"; exit 1; }
+          test -n "$EC2_SSH_PRIVATE_KEY" || { echo "EC2_SSH_PRIVATE_KEY secret is required"; exit 1; }
+          install -m 700 -d "$RUNNER_TEMP/ssh"
+          printf '%s\n' "$EC2_SSH_PRIVATE_KEY" > "$RUNNER_TEMP/ssh/deploy_key"
+          chmod 600 "$RUNNER_TEMP/ssh/deploy_key"
+
+      - name: Copy Compose definition to EC2
+        shell: bash
+        run: |
+          set -euo pipefail
+          ssh -i "$RUNNER_TEMP/ssh/deploy_key" \
+            -o StrictHostKeyChecking=accept-new \
+            "$EC2_USER@$EC2_HOST" \
+            "sudo -n install -d -o '$EC2_USER' -g \"\$(id -gn)\" '$EC2_APP_DIR'"
+          scp -i "$RUNNER_TEMP/ssh/deploy_key" \
+            -o StrictHostKeyChecking=accept-new \
+            compose.yaml "$EC2_USER@$EC2_HOST:$EC2_APP_DIR/compose.yaml"
+          scp -i "$RUNNER_TEMP/ssh/deploy_key" \
+            -o StrictHostKeyChecking=accept-new \
+            .env.example "$EC2_USER@$EC2_HOST:$EC2_APP_DIR/.env.example"
+          scp -r -i "$RUNNER_TEMP/ssh/deploy_key" \
+            -o StrictHostKeyChecking=accept-new \
+            observability "$EC2_USER@$EC2_HOST:$EC2_APP_DIR/"
+
+      - name: Pull, restart and verify on EC2
+        shell: bash
+        env:
+          DEPLOY_IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          DEPLOY_IMAGE_TAG: ${{ env.IMAGE_TAG }}
+        run: |
+          set -euo pipefail
+          ssh -i "$RUNNER_TEMP/ssh/deploy_key" \
+            -o StrictHostKeyChecking=accept-new \
+            "$EC2_USER@$EC2_HOST" \
+            "DEPLOY_IMAGE_NAME='$DEPLOY_IMAGE_NAME' DEPLOY_IMAGE_TAG='$DEPLOY_IMAGE_TAG' EC2_APP_DIR='$EC2_APP_DIR' bash -s" <<'REMOTE_SCRIPT'
+          set -euo pipefail
+          cd "$EC2_APP_DIR"
+          test -f .env || cp .env.example .env
+          previous_image="$(docker inspect --format '{{.Config.Image}}' study-planner-agent 2>/dev/null || true)"
+          export IMAGE_NAME="$DEPLOY_IMAGE_NAME"
+          export IMAGE_TAG="$DEPLOY_IMAGE_TAG"
+          docker compose pull
+          docker compose up -d --no-build
+
+          healthy=0
+          for attempt in $(seq 1 30); do
+            container_health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}starting{{end}}' study-planner-agent 2>/dev/null || true)"
+            if [ "$container_health" = "healthy" ]; then
+              healthy=1
+              break
+            fi
+            sleep 2
+          done
+
+          if [ "$healthy" -ne 1 ]; then
+            echo "New deployment failed health check; attempting rollback"
+            docker compose logs --tail=100 app || true
+            if [ -n "$previous_image" ] && [[ "$previous_image" == *:* ]]; then
+              export IMAGE_NAME="${previous_image%:*}"
+              export IMAGE_TAG="${previous_image##*:}"
+              docker compose up -d --no-build || true
+            fi
+            exit 1
+          fi
+
+          docker image prune --force --filter "until=168h" || true
+          docker compose ps
+          REMOTE_SCRIPT
+
+  deploy-production:
+    name: Deploy to production EC2
+    needs: [test, build, deploy-dev]
     if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && inputs.deploy == true)
     runs-on: ubuntu-latest
     environment:
