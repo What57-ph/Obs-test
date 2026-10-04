@@ -22,7 +22,9 @@ concurrency:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ghcr.io/${{ github.repository }}
+  # Docker/OCI image repository names must be lowercase. The GitHub repository
+  # is named What57-ph/Obs-test and github.repository preserves that casing.
+  IMAGE_NAME: ghcr.io/what57-ph/obs-test
   IMAGE_TAG: sha-${{ github.sha }}
 
 jobs:
