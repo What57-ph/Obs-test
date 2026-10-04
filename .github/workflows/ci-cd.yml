@@ -132,7 +132,8 @@ jobs:
           set -euo pipefail
           ssh -i "$RUNNER_TEMP/ssh/deploy_key" \
             -o StrictHostKeyChecking=accept-new \
-            "$EC2_USER@$EC2_HOST" "mkdir -p '$EC2_APP_DIR'"
+            "$EC2_USER@$EC2_HOST" \
+            "sudo -n install -d -o '$EC2_USER' -g \"\$(id -gn)\" '$EC2_APP_DIR'"
           scp -i "$RUNNER_TEMP/ssh/deploy_key" \
             -o StrictHostKeyChecking=accept-new \
             compose.yaml "$EC2_USER@$EC2_HOST:$EC2_APP_DIR/compose.yaml"
